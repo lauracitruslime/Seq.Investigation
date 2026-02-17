@@ -262,90 +262,38 @@ function New-DraftJira {
     )
     
     $timeRange = "$($config.TimeRangeHours) hours"
-    $seqUrl = "$($config.SeqUrl)/#/events?filter=EventType%20%3D%20'$EventType'"
     
-    $sample = $ErrorDetails[0]
-    $exception = $sample.Exception
-    if ($exception -and $exception.Length -gt 500) {
-        $exception = $exception.Substring(0, 500) + "..."
+    # Convert EventType from $XXXXXXXX to 0xXXXXXXXX format for SEQ filter
+    $seqEventTypeFilter = if ($EventType -match '^\$([A-Fa-f0-9]+)$') {
+        "@EventType = 0x$($Matches[1])"
+    } else {
+        "@Message like '%$MessageTemplate%'"
+    }
+    
+    # Calculate logs per 12 hours
+    $logsPerHalfDay = [math]::Round($Count * 12 / $config.TimeRangeHours)
+    
+    # Determine suggested action based on classification
+    $suggestedAction = switch ($Classification) {
+        "Bug" { "Fix underlying bug" }
+        "ExternalNoise" { "Reduce log level or remove log" }
+        "Transient" { "No action needed - transient error" }
+        default { "Review and classify" }
     }
     
     $draft = @"
-# [$Classification] $MessageTemplate
+### Why?
+Cleaning up logging issues improves quality of life for all involved in monitoring, and allows us to be more efficient in spotting real issues.
 
-## Summary
-**Error Template**: ``$MessageTemplate``
-**EventType**: ``$EventType``
-**Occurrences**: $Count in last $timeRange
-**Classification**: $Classification
+### What?
+- **MessageTemplate**: ``$MessageTemplate``
+- **Quantity of logs**: ~$logsPerHalfDay / 12 hours
+- **Suggested action**: $suggestedAction
+- **SEQ Filter**: ``$seqEventTypeFilter``
 
-## Description
+### How?
+
 "@
-
-    if ($Classification -eq "Bug") {
-        $draft += @"
-
-This error has occurred $Count times in the last $timeRange and appears to be a code defect requiring investigation.
-
-### Sample Error Details
-**Timestamp**: $($sample.Timestamp)
-**Exception**:
-``````
-$exception
-``````
-
-### Properties
-"@
-        $sample.Properties | Where-Object { $_.Name -notlike "AppDomain*" } | Select-Object -First 5 | ForEach-Object {
-            $draft += "`n- **$($_.Name)**: $($_.Value)"
-        }
-        
-        $draft += @"
-
-
-## Investigation
-- [ ] Review error pattern in SEQ
-- [ ] Identify root cause
-- [ ] Implement fix
-- [ ] Add tests
-
-## Links
-- [View in SEQ]($seqUrl)
-- [Epic: CLECOM-11226](https://citruslime.atlassian.net/browse/CLECOM-11226)
-"@
-    }
-    elseif ($Classification -eq "ExternalNoise") {
-        $draft += @"
-
-This error has occurred $Count times in the last $timeRange and appears to be caused by external factors (crawlers, invalid requests, etc.) outside of our control.
-
-### Sample Error Details
-**Timestamp**: $($sample.Timestamp)
-**Message**: $MessageTemplate
-
-### Properties
-"@
-        $sample.Properties | Where-Object { $_.Name -in @('Url', 'UserAgent', 'RequestPath') } | ForEach-Object {
-            $draft += "`n- **$($_.Name)**: $($_.Value)"
-        }
-        
-        $draft += @"
-
-
-## Recommendation
-Consider one of the following actions:
-- [ ] Downgrade log level from Error to Warning
-- [ ] Add filtering to ignore known crawler patterns
-- [ ] Remove logging entirely if not actionable
-
-## Rationale
-This error is triggered by external factors we cannot control. Logging at Error level creates noise in our monitoring without providing actionable insights.
-
-## Links
-- [View in SEQ]($seqUrl)
-- [Epic: CLECOM-11226](https://citruslime.atlassian.net/browse/CLECOM-11226)
-"@
-    }
     
     return $draft
 }
@@ -515,7 +463,14 @@ function Start-ErrorInvestigationWorkflow {
     Write-Host "`n[7/8] Creating Jira issues..." -ForegroundColor Cyan
     foreach ($draft in $draftsToCreate) {
         try {
-            $summary = "[$($draft.Classification)] $($draft.MessageTemplate.Substring(0, [Math]::Min(80, $draft.MessageTemplate.Length)))"
+            # Title format: "Logging // Bug - name" or "Logging // Noise suppression - name"
+            $titlePrefix = switch ($draft.Classification) {
+                "Bug" { "Logging // Bug" }
+                "ExternalNoise" { "Logging // Noise suppression" }
+                default { "Logging // $($draft.Classification)" }
+            }
+            $name = $draft.MessageTemplate.Substring(0, [Math]::Min(60, $draft.MessageTemplate.Length))
+            $summary = "$titlePrefix - $name"
             $jiraKey = New-JiraIssue -Summary $summary -Description $draft.Draft -IssueType "Bug"
             
             Write-Host "  ✓ Created $jiraKey" -ForegroundColor Green
