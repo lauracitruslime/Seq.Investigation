@@ -1,0 +1,19 @@
+# Environment and secrets
+.env
+*.env
+
+# Operational data
+suppressions.json
+
+# PowerShell
+*.ps1.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
